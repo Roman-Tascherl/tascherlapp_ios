@@ -254,6 +254,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NFCReaderUsageDescription = "";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Tascherl benötigt die Kamera, um QR-Codes und Barcodes von Karten zu scannen.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Tascherl verwendet Face ID, um deine Karten zu schützen.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Tascherl verwendet deinen Standort, um automatisch passende Karten vorzuschlagen.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -298,6 +302,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NFCReaderUsageDescription = "";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Tascherl benötigt die Kamera, um QR-Codes und Barcodes von Karten zu scannen.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Tascherl verwendet Face ID, um deine Karten zu schützen.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Tascherl verwendet deinen Standort, um automatisch passende Karten vorzuschlagen.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
