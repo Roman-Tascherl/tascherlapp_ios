@@ -3,12 +3,14 @@ import Combine
 import LocalAuthentication
 import CoreImage.CIFilterBuiltins
 import CoreLocation
+import Network
 
 #if os(iOS)
 import UIKit
 import AVFoundation
 import CoreNFC
 import PassKit
+import PhotosUI
 #endif
 
 #if os(macOS)
@@ -99,8 +101,44 @@ enum AppTab: Int, CaseIterable, Identifiable, Hashable {
         }
     }
 }
+
+enum AddCardMode: String, CaseIterable, Identifiable {
+    case barcode
+    case qr
+    case nfc
+    case screenshot
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .barcode:
+            return "Barcode"
+        case .qr:
+            return "QR"
+        case .nfc:
+            return "NFC"
+        case .screenshot:
+            return "Screenshot"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .barcode:
+            return "barcode"
+        case .qr:
+            return "qrcode"
+        case .nfc:
+            return "wave.3.right.circle.fill"
+        case .screenshot:
+            return "photo"
+        }
+    }
+}
+
 struct TascherlCard: Identifiable, Codable, Equatable {
-    var id: UUID = UUID()
+    var id: UUID
     var name: String
     var company: String
     var brand: String
@@ -113,65 +151,113 @@ struct TascherlCard: Identifiable, Codable, Equatable {
     var gradientStartHex: String
     var gradientEndHex: String
     var walletPassURL: String?
+    var renderType: CardRenderType
+    var imageData: Data?
 
-    static let demoCards: [TascherlCard] = [
-        TascherlCard(
-            name: "Amazon",
-            company: "Amazon",
-            brand: "amazon",
-            type: .qr,
-            category: "Shopping",
-            info: "Online Account & Gutscheine",
-            code: "AMZ-22341-9981",
-            locationHint: "Online verwendbar",
-            favorite: true,
-            gradientStartHex: "#64748B",
-            gradientEndHex: "#020617",
-            walletPassURL: nil
-        ),
-        TascherlCard(
-            name: "BILLA Karte",
-            company: "BILLA",
-            brand: "billa",
-            type: .barcode,
-            category: "Supermarkt",
-            info: "Bonuskarte / Punkte sammeln",
-            code: "BIL-99821-2026",
-            locationHint: "Wird im Store vorgeschlagen",
-            favorite: true,
-            gradientStartHex: "#FACC15",
-            gradientEndHex: "#DC2626",
-            walletPassURL: nil
-        ),
-        TascherlCard(
-            name: "McDonalds Rewards",
-            company: "McDonalds",
-            brand: "mcdonalds",
-            type: .qr,
-            category: "Food",
-            info: "Rewards & Gutscheine",
-            code: "MCD-88221-7719",
-            locationHint: "Beim Bestellen anzeigen",
-            favorite: false,
-            gradientStartHex: "#FACC15",
-            gradientEndHex: "#B91C1C",
-            walletPassURL: nil
-        ),
-        TascherlCard(
-            name: "Lidl NFC Demo",
-            company: "Lidl",
-            brand: "lidl",
-            type: .nfc,
-            category: "NFC Demo",
-            info: "Native NFC-Lesedemo",
-            code: "LIDL-NFC-7721",
-            locationHint: "NFC-Tag lesen oder am Terminal simulieren",
-            favorite: true,
-            gradientStartHex: "#2563EB",
-            gradientEndHex: "#FACC15",
-            walletPassURL: nil
-        )
-    ]
+    enum CardRenderType: String, Codable, CaseIterable, Identifiable {
+        case barcode
+        case qr
+        case image
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .barcode:
+                return "Barcode"
+            case .qr:
+                return "QR"
+            case .image:
+                return "Screenshot"
+            }
+        }
+    }
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        company: String,
+        brand: String,
+        type: TascherlCardType,
+        category: String,
+        info: String,
+        code: String,
+        locationHint: String,
+        favorite: Bool,
+        gradientStartHex: String,
+        gradientEndHex: String,
+        walletPassURL: String? = nil,
+        renderType: CardRenderType = .barcode,
+        imageData: Data? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.company = company
+        self.brand = brand
+        self.type = type
+        self.category = category
+        self.info = info
+        self.code = code
+        self.locationHint = locationHint
+        self.favorite = favorite
+        self.gradientStartHex = gradientStartHex
+        self.gradientEndHex = gradientEndHex
+        self.walletPassURL = walletPassURL
+        self.renderType = renderType
+        self.imageData = imageData
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case company
+        case brand
+        case type
+        case category
+        case info
+        case code
+        case locationHint
+        case favorite
+        case gradientStartHex
+        case gradientEndHex
+        case walletPassURL
+        case renderType
+        case imageData
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        company = try container.decode(String.self, forKey: .company)
+        brand = try container.decode(String.self, forKey: .brand)
+        type = try container.decode(TascherlCardType.self, forKey: .type)
+        category = try container.decode(String.self, forKey: .category)
+        info = try container.decode(String.self, forKey: .info)
+        code = try container.decode(String.self, forKey: .code)
+        locationHint = try container.decode(String.self, forKey: .locationHint)
+        favorite = try container.decode(Bool.self, forKey: .favorite)
+        gradientStartHex = try container.decode(String.self, forKey: .gradientStartHex)
+        gradientEndHex = try container.decode(String.self, forKey: .gradientEndHex)
+        walletPassURL = try container.decodeIfPresent(String.self, forKey: .walletPassURL)
+
+        // Wichtig: alte gespeicherte Karten ohne renderType sollen nicht crashen
+        renderType = try container.decodeIfPresent(CardRenderType.self, forKey: .renderType) ?? Self.defaultRenderType(for: type)
+
+        imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
+    }
+
+    private static func defaultRenderType(for type: TascherlCardType) -> CardRenderType {
+        switch type {
+        case .qr:
+            return .qr
+        case .barcode:
+            return .barcode
+        case .nfc:
+            return .barcode
+        }
+    }
 }
 
 // MARK: - Helpers
@@ -214,11 +300,14 @@ func impact() {
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     #endif
 }
+enum TascherlTheme {
+    static let matteYellow = Color(red: 0.78, green: 0.62, blue: 0.28)
+}
 
 struct AppTLogo: View {
     var size: CGFloat = 56
 
-    private let matteYellow = Color(red: 0.82, green: 0.66, blue: 0.28)
+    private let matteYellow = TascherlTheme.matteYellow
 
     var body: some View {
         #if os(iOS)
@@ -258,67 +347,544 @@ struct AppTLogo: View {
     }
 }
 // MARK: - Store
+struct StoreRelations {
+    static func usableStores(for brand: String) -> [String] {
+        let normalized = normalizeBrand(brand)
+
+        switch normalized {
+        case "jo", "joe", "jö":
+            return [
+                "BILLA",
+                "BILLA Plus",
+                "Penny",
+                "OMV",
+                "ADEG"
+            ]
+
+        default:
+            return []
+        }
+    }
+}
+
 
 final class CardStore: ObservableObject {
     @Published var cards: [TascherlCard] = [] {
-        didSet { saveCards() }
+        didSet {
+            save()
+        }
     }
 
     @Published var selectedCard: TascherlCard?
     @Published var smartSuggestion: TascherlCard?
+    @Published var smartSuggestionText: String = ""
 
-    private let storageKey = "tascherl_cards_native_multiplatform"
+    private let storageKey = "tascherl_cards"
+    private let lastSuggestionKey = "tascherl_last_suggestion"
 
     init() {
-        loadCards()
+        load()
+    }
 
-        if cards.isEmpty {
-            cards = TascherlCard.demoCards
+    // MARK: - Add
+
+    func add(_ card: TascherlCard) {
+        cards.append(card)
+    }
+
+    // Kompatibilität mit deinem bestehenden AddCardHostView
+    func addCard(_ card: TascherlCard) {
+        add(card)
+    }
+
+    // MARK: - Delete
+
+    func delete(_ card: TascherlCard) {
+        cards.removeAll { $0.id == card.id }
+
+        if selectedCard?.id == card.id {
+            selectedCard = nil
+        }
+
+        if smartSuggestion?.id == card.id {
+            clearSmartSuggestion()
         }
     }
 
-    func addCard(_ card: TascherlCard) {
-        cards.insert(card, at: 0)
-    }
-
-    func deleteCard(_ card: TascherlCard) {
-        cards.removeAll { $0.id == card.id }
-    }
+    // MARK: - Reset / Clear
 
     func resetDemo() {
-        cards = TascherlCard.demoCards
+        // Weil du keine Beispielkarten mehr willst:
+        // Reset bedeutet ab jetzt: alle Karten löschen.
+        cards.removeAll()
+        clearSmartSuggestion()
+        UserDefaults.standard.removeObject(forKey: lastSuggestionKey)
     }
 
-    func updateSmartSuggestion(locationEnabled: Bool) {
-        guard locationEnabled else {
-            smartSuggestion = nil
-            return
+    // MARK: - Smart Suggestion
+
+    func clearSmartSuggestion() {
+        smartSuggestion = nil
+        smartSuggestionText = ""
+    }
+
+    func setSmartSuggestion(card: TascherlCard, distanceMeters: Double?, online: Bool) {
+        smartSuggestion = card
+
+        if let distanceMeters {
+            let rounded = Int(distanceMeters.rounded())
+            smartSuggestionText = online
+                ? "\(card.company) ist ca. \(rounded)m entfernt"
+                : "\(card.company) ist laut Offline-Daten ca. \(rounded)m entfernt"
+        } else {
+            smartSuggestionText = "Zuletzt in deiner Nähe: \(card.company)"
         }
 
-        // Demo-Logik: Wenn Standortvorschläge aktiv sind, wird Lidl vorgeschlagen.
-        // Später kann hier echte Standortlogik rein.
-        if let lidlCard = cards.first(where: { normalizeBrand($0.brand) == "lidl" || normalizeBrand($0.company) == "lidl" }) {
-            smartSuggestion = lidlCard
-            return
+        saveLastSuggestion(card)
+    }
+
+    func saveLastSuggestion(_ card: TascherlCard) {
+        if let data = try? JSONEncoder().encode(card) {
+            UserDefaults.standard.set(data, forKey: lastSuggestionKey)
+        }
+    }
+
+    func loadLastSuggestion() -> TascherlCard? {
+        guard let data = UserDefaults.standard.data(forKey: lastSuggestionKey),
+              let decoded = try? JSONDecoder().decode(TascherlCard.self, from: data)
+        else {
+            return nil
         }
 
-        smartSuggestion = cards.first(where: { $0.favorite }) ?? cards.first
+        return decoded
     }
 
-    private func saveCards() {
-        guard let data = try? JSONEncoder().encode(cards) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
+    // MARK: - Persistence
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(cards) {
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
     }
 
-    private func loadCards() {
+    private func load() {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([TascherlCard].self, from: data)
-        else { return }
+        else {
+            cards = []
+            return
+        }
 
         cards = decoded
     }
 }
 
+
+struct StorePOI: Codable, Identifiable {
+    var id: String
+    var brand: String
+    var name: String
+    var latitude: Double
+    var longitude: Double
+}
+
+final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var isOnline: Bool = true
+    @Published var statusText: String = ""
+
+    private let locationManager = CLLocationManager()
+    private let monitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "Tascherl.NetworkMonitor")
+
+    private weak var store: CardStore?
+
+    private var locationEnabled: Bool = true
+    private var offlineStoreDataEnabled: Bool = false
+
+    private var lastRefreshDate: Date = .distantPast
+    private var isRefreshing = false
+
+    private let cacheKey = "tascherl_cached_store_pois"
+
+    override init() {
+        super.init()
+
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        locationManager.distanceFilter = 100
+
+        monitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.isOnline = path.status == .satisfied
+            }
+        }
+
+        monitor.start(queue: monitorQueue)
+    }
+
+    func refresh(
+        store: CardStore,
+        locationEnabled: Bool,
+        offlineStoreDataEnabled: Bool,
+        force: Bool = false
+    ) {
+        self.store = store
+        self.locationEnabled = locationEnabled
+        self.offlineStoreDataEnabled = offlineStoreDataEnabled
+
+        // ✅ Wenn ausgeschaltet → alles löschen
+        guard locationEnabled else {
+            store.clearSmartSuggestion()
+            statusText = "Standortvorschläge deaktiviert"
+            return
+        }
+
+        // ✅ 1. SOFORT letzten Vorschlag anzeigen (wichtig für Offline & Speed!)
+        if let last = store.loadLastSuggestion() {
+            store.smartSuggestion = last
+            store.smartSuggestionText = "Zuletzt in deiner Nähe: \(last.company)"
+        }
+
+        // ✅ 2. Cache sofort nutzen wenn erlaubt
+        if offlineStoreDataEnabled, let lastLocation = locationManager.location {
+            findNearestFromCache(currentLocation: lastLocation, store: store)
+        }
+
+        // ✅ 3. Refresh throttling (verhindert Spam)
+        let now = Date()
+        if !force && now.timeIntervalSince(lastRefreshDate) < 12 {
+            return
+        }
+
+        lastRefreshDate = now
+
+        // ✅ 4. Wenn iOS schon Location hat → sofort verwenden
+        if let cachedLocation = locationManager.location {
+            if isOnline {
+                if !isRefreshing {
+                    isRefreshing = true
+                    fetchNearbyStoresOnline(currentLocation: cachedLocation, store: store)
+                }
+            } else {
+                // ✅ Offline fallback
+                if offlineStoreDataEnabled {
+                    findNearestFromCache(currentLocation: cachedLocation, store: store)
+                }
+                // ❌ KEIN clear hier → sonst verschwindet dein letzter Vorschlag!
+            }
+        }
+
+        // ✅ 5. Frische Location im Hintergrund holen
+        locationManager.requestWhenInUseAuthorization()
+        locationManager.requestLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let currentLocation = locations.last,
+              let store
+        else { return }
+
+        if isRefreshing {
+            return
+        }
+
+        isRefreshing = true
+
+        if isOnline {
+            statusText = "Online: Suche nahe Filialen"
+            fetchNearbyStoresOnline(currentLocation: currentLocation, store: store)
+        } else {
+            statusText = "Offline"
+
+            if offlineStoreDataEnabled {
+                findNearestFromCache(currentLocation: currentLocation, store: store)
+            } else {
+                store.clearSmartSuggestion()
+                statusText = "Offline: keine lokalen Standortdaten aktiviert"
+            }
+
+            isRefreshing = false
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        DispatchQueue.main.async {
+            self.store?.clearSmartSuggestion()
+            self.statusText = "Standort konnte nicht geladen werden"
+            self.isRefreshing = false
+        }
+
+        print("Location error:", error.localizedDescription)
+    }
+
+    private func fetchNearbyStoresOnline(currentLocation: CLLocation, store: CardStore) {
+        let lat = currentLocation.coordinate.latitude
+        let lon = currentLocation.coordinate.longitude
+
+        let brandRegex = buildBrandRegex(from: store.cards)
+
+        guard !brandRegex.isEmpty else {
+            store.clearSmartSuggestion()
+            statusText = "Keine Kartenmarken für Standortsuche"
+            isRefreshing = false
+            return
+        }
+
+        let query = """
+        [out:json][timeout:8];
+        (
+          node(around:900,\(lat),\(lon))["brand"~"\(brandRegex)",i];
+          way(around:900,\(lat),\(lon))["brand"~"\(brandRegex)",i];
+          relation(around:900,\(lat),\(lon))["brand"~"\(brandRegex)",i];
+
+          node(around:900,\(lat),\(lon))["name"~"\(brandRegex)",i];
+          way(around:900,\(lat),\(lon))["name"~"\(brandRegex)",i];
+          relation(around:900,\(lat),\(lon))["name"~"\(brandRegex)",i];
+        );
+        out center tags;
+        """
+
+        guard let url = URL(string: "https://overpass-api.de/api/interpreter") else {
+            isRefreshing = false
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+
+        let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        request.httpBody = "data=\(encodedQuery)".data(using: .utf8)
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+            guard let self else { return }
+
+            if let error {
+                DispatchQueue.main.async {
+                    print("Overpass error:", error.localizedDescription)
+
+                    if self.offlineStoreDataEnabled {
+                        self.findNearestFromCache(currentLocation: currentLocation, store: store)
+                    } else {
+                        store.clearSmartSuggestion()
+                        self.statusText = "Online-Suche fehlgeschlagen"
+                    }
+
+                    self.isRefreshing = false
+                }
+
+                return
+            }
+
+            guard let data else {
+                DispatchQueue.main.async {
+                    store.clearSmartSuggestion()
+                    self.statusText = "Keine Online-Daten erhalten"
+                    self.isRefreshing = false
+                }
+
+                return
+            }
+
+            do {
+                let response = try JSONDecoder().decode(OverpassResponse.self, from: data)
+
+                let pois = response.elements.compactMap { element -> StorePOI? in
+                    let brand = element.tags?.brand ?? element.tags?.name ?? ""
+                    let name = element.tags?.name ?? brand
+
+                    let resolvedLat = element.lat ?? element.center?.lat
+                    let resolvedLon = element.lon ?? element.center?.lon
+
+                    guard let resolvedLat,
+                          let resolvedLon,
+                          !brand.isEmpty
+                    else {
+                        return nil
+                    }
+
+                    return StorePOI(
+                        id: "\(element.type)-\(element.id)",
+                        brand: brand,
+                        name: name,
+                        latitude: resolvedLat,
+                        longitude: resolvedLon
+                    )
+                }
+
+                DispatchQueue.main.async {
+                    self.saveCachedPOIs(pois)
+
+                    self.applyNearestPOI(
+                        pois,
+                        currentLocation: currentLocation,
+                        store: store,
+                        online: true
+                    )
+
+                    self.isRefreshing = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    print("Decode error:", error.localizedDescription)
+
+                    if self.offlineStoreDataEnabled {
+                        self.findNearestFromCache(currentLocation: currentLocation, store: store)
+                    } else {
+                        store.clearSmartSuggestion()
+                        self.statusText = "Online-Daten konnten nicht gelesen werden"
+                    }
+
+                    self.isRefreshing = false
+                }
+            }
+        }.resume()
+    }
+
+    private func findNearestFromCache(currentLocation: CLLocation, store: CardStore) {
+        let pois = loadCachedPOIs()
+        applyNearestPOI(pois, currentLocation: currentLocation, store: store, online: false)
+    }
+
+    private func applyNearestPOI(
+        _ pois: [StorePOI],
+        currentLocation: CLLocation,
+        store: CardStore,
+        online: Bool
+    ) {
+        guard !pois.isEmpty else {
+            store.clearSmartSuggestion()
+            statusText = online ? "Keine nahe Filiale gefunden" : "Keine Offline-Daten gefunden"
+            return
+        }
+
+        let nearest = pois
+            .map { poi -> (poi: StorePOI, distance: Double) in
+                let poiLocation = CLLocation(latitude: poi.latitude, longitude: poi.longitude)
+                return (poi, currentLocation.distance(from: poiLocation))
+            }
+            .sorted { $0.distance < $1.distance }
+            .first
+
+        guard let nearest else {
+            store.clearSmartSuggestion()
+            return
+        }
+
+        guard nearest.distance <= 1500 else {
+            store.clearSmartSuggestion()
+            statusText = "Keine passende Karte in der Nähe"
+            return
+        }
+
+        let matchedBrand = normalizeBrand(nearest.poi.brand)
+
+        if let matchedCard = store.cards.first(where: {
+            let cardBrand = normalizeBrand($0.brand)
+            let cardCompany = normalizeBrand($0.company)
+            let cardName = normalizeBrand($0.name)
+
+            return matchedBrand.contains(cardBrand)
+                || cardBrand.contains(matchedBrand)
+                || matchedBrand.contains(cardCompany)
+                || cardCompany.contains(matchedBrand)
+                || matchedBrand.contains(cardName)
+                || cardName.contains(matchedBrand)
+        }) {
+            store.setSmartSuggestion(
+                card: matchedCard,
+                distanceMeters: nearest.distance,
+                online: online
+            )
+        } else {
+            store.clearSmartSuggestion()
+            statusText = "Filiale erkannt, aber keine passende Karte gespeichert"
+        }
+    }
+
+    private func saveCachedPOIs(_ pois: [StorePOI]) {
+        guard offlineStoreDataEnabled else { return }
+
+        var existing = loadCachedPOIs()
+
+        for poi in pois {
+            if !existing.contains(where: { $0.id == poi.id }) {
+                existing.append(poi)
+            }
+        }
+
+        guard let data = try? JSONEncoder().encode(existing) else { return }
+        UserDefaults.standard.set(data, forKey: cacheKey)
+    }
+
+    private func loadCachedPOIs() -> [StorePOI] {
+        guard let data = UserDefaults.standard.data(forKey: cacheKey),
+              let decoded = try? JSONDecoder().decode([StorePOI].self, from: data)
+        else {
+            return []
+        }
+
+        return decoded
+    }
+
+    private func buildBrandRegex(from cards: [TascherlCard]) -> String {
+        let names = cards.flatMap { card in
+            [
+                card.brand,
+                card.company,
+                card.name
+            ]
+        }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .map { escapeRegex($0) }
+
+        let unique = Array(Set(names))
+
+        return unique.joined(separator: "|")
+    }
+
+    private func escapeRegex(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: ".", with: "\\.")
+            .replacingOccurrences(of: "+", with: "\\+")
+            .replacingOccurrences(of: "*", with: "\\*")
+            .replacingOccurrences(of: "?", with: "\\?")
+            .replacingOccurrences(of: "^", with: "\\^")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "(", with: "\\(")
+            .replacingOccurrences(of: ")", with: "\\)")
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+            .replacingOccurrences(of: "{", with: "\\{")
+            .replacingOccurrences(of: "}", with: "\\}")
+            .replacingOccurrences(of: "|", with: "\\|")
+    }
+}
+
+struct OverpassResponse: Codable {
+    let elements: [OverpassElement]
+}
+
+struct OverpassElement: Codable {
+    let type: String
+    let id: Int
+    let lat: Double?
+    let lon: Double?
+    let center: OverpassCenter?
+    let tags: OverpassTags?
+}
+
+struct OverpassCenter: Codable {
+    let lat: Double
+    let lon: Double
+}
+
+struct OverpassTags: Codable {
+    let name: String?
+    let brand: String?
+}
 // MARK: - App Entry
 
 @main
@@ -441,25 +1007,39 @@ struct UnlockView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [.black, Color(hex: "#111827")], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
+            LinearGradient(
+                colors: [
+                    Color.black,
+                    Color(hex: "#11100B"),
+                    Color.black
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
 
             VStack(spacing: 24) {
-                RoundedRectangle(cornerRadius: 32)
-                    .fill(
-                        LinearGradient(
-                            colors: [.purple, .pink, .orange],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                ZStack {
+                    RoundedRectangle(cornerRadius: 32)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.10),
+                                    Color.white.opacity(0.035)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: 104, height: 104)
-                    .overlay {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 38, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    .shadow(color: .pink.opacity(0.3), radius: 25)
+                        .frame(width: 104, height: 104)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 32)
+                                .stroke(TascherlTheme.matteYellow.opacity(0.22), lineWidth: 1)
+                        }
+                        .shadow(color: .black.opacity(0.35), radius: 24, y: 14)
+
+                    AppTLogo(size: 58)
+                }
 
                 Text("Tascherl ist gesperrt")
                     .font(.title.bold())
@@ -487,7 +1067,7 @@ struct UnlockView: View {
                         .foregroundStyle(.black)
                         .padding(.horizontal, 24)
                         .padding(.vertical, 14)
-                        .background(.white)
+                        .background(TascherlTheme.matteYellow)
                         .clipShape(RoundedRectangle(cornerRadius: 18))
                 }
             }
@@ -527,8 +1107,6 @@ struct UnlockView: View {
 
 struct MainShellView: View {
     @EnvironmentObject var store: CardStore
-    @AppStorage("tascherl_locationEnabled") private var locationEnabled = true
-
     @State private var selectedTab: AppTab = .cards
 
     private var animatedTabSelection: Binding<AppTab> {
@@ -574,21 +1152,12 @@ struct MainShellView: View {
                 Label(AppTab.settings.title, systemImage: AppTab.settings.icon)
             }
         }
-        .tint(.pink)
+        .tint(TascherlTheme.matteYellow)
         .animation(.easeInOut(duration: 0.24), value: selectedTab)
         #if os(iOS)
         .toolbarBackground(.automatic, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         #endif
-        .onAppear {
-            store.updateSmartSuggestion(locationEnabled: locationEnabled)
-        }
-        .onChange(of: locationEnabled) { newValue in
-            store.updateSmartSuggestion(locationEnabled: newValue)
-        }
-        .onChange(of: store.cards) { _ in
-            store.updateSmartSuggestion(locationEnabled: locationEnabled)
-        }
     }
 }
 struct SwipeableTabScreen<Content: View>: View {
@@ -606,11 +1175,12 @@ struct SwipeableTabScreen<Content: View>: View {
     var body: some View {
         content
             .contentShape(Rectangle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 45, coordinateSpace: .local)
+            .gesture(
+                DragGesture(minimumDistance: 65, coordinateSpace: .local)
                     .onEnded { value in
                         handleSwipe(value)
-                    }
+                    },
+                including: .gesture
             )
     }
 
@@ -618,11 +1188,15 @@ struct SwipeableTabScreen<Content: View>: View {
         let horizontal = value.translation.width
         let vertical = value.translation.height
 
-        guard abs(horizontal) > abs(vertical) * 1.4 else { return }
+        // Nur wirklich horizontale Swipes akzeptieren
+        guard abs(horizontal) > abs(vertical) * 2.2 else { return }
 
-        if horizontal < -85 {
+        // Kleine Bewegungen ignorieren
+        guard abs(horizontal) > 95 else { return }
+
+        if horizontal < 0 {
             goNext()
-        } else if horizontal > 85 {
+        } else {
             goPrevious()
         }
     }
@@ -656,19 +1230,29 @@ struct SwipeableTabScreen<Content: View>: View {
 struct CardsHomeView: View {
     @EnvironmentObject var store: CardStore
 
+    @AppStorage("tascherl_locationEnabled") private var locationEnabled = true
+    @AppStorage("tascherl_offlineStoreDataEnabled") private var offlineStoreDataEnabled = false
+
+    @StateObject private var nearbyManager = NearbyCardManager()
+
     var body: some View {
         NavigationStack {
             ZStack {
                 BackgroundView()
 
                 ScrollView {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 18) {
                         CompactHeaderView(cardCount: store.cards.count)
 
-                        if let suggestion = store.smartSuggestion {
-                            SmartSuggestionView(card: suggestion) {
+                        if locationEnabled, let suggestion = store.smartSuggestion {
+                            SmartSuggestionView(
+                                card: suggestion,
+                                subtitle: store.smartSuggestionText
+                            ) {
                                 openCard(suggestion)
                             }
+                            .zIndex(10)
+                            .padding(.bottom, 6)
                         }
 
                         VStack(spacing: 14) {
@@ -677,8 +1261,19 @@ struct CardsHomeView: View {
                                     openCard(card)
                                 } label: {
                                     WalletCardView(card: card)
+                                        .contentShape(RoundedRectangle(cornerRadius: 30))
                                 }
                                 .buttonStyle(.plain)
+                                .frame(height: 142)
+                                .contentShape(RoundedRectangle(cornerRadius: 30))
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        store.delete(card)
+                                    } label: {
+                                        Label("Karte löschen", systemImage: "trash")
+                                    }
+                                }
+                                .zIndex(1)
                             }
                         }
                     }
@@ -686,6 +1281,32 @@ struct CardsHomeView: View {
                 }
             }
             .navigationBarHidden(true)
+            .onAppear {
+                nearbyManager.refresh(
+                    store: store,
+                    locationEnabled: locationEnabled,
+                    offlineStoreDataEnabled: offlineStoreDataEnabled,
+                    force: true
+                )
+            }
+            .onChange(of: locationEnabled) {
+                nearbyManager.refresh(
+                    store: store,
+                    locationEnabled: locationEnabled,   // ✅ FIX
+                    offlineStoreDataEnabled: offlineStoreDataEnabled,
+                    force: true
+                )
+            }
+
+            .onChange(of: offlineStoreDataEnabled) {
+                nearbyManager.refresh(
+                    store: store,
+                    locationEnabled: locationEnabled,
+                    offlineStoreDataEnabled: offlineStoreDataEnabled, // ✅ FIX
+                    force: true
+                )
+            }
+
             .sheet(item: $store.selectedCard) { card in
                 CardDetailView(card: card)
                     .presentationDetentsIfAvailable()
@@ -701,7 +1322,6 @@ struct CardsHomeView: View {
         }
     }
 }
-
 extension View {
     @ViewBuilder
     func presentationDetentsIfAvailable() -> some View {
@@ -741,6 +1361,7 @@ struct CompactHeaderView: View {
 
 struct SmartSuggestionView: View {
     let card: TascherlCard
+    let subtitle: String
     var onOpen: () -> Void
 
     @State private var pressed = false
@@ -771,6 +1392,13 @@ struct SmartSuggestionView: View {
                     Text("\(card.company) Karte schnell öffnen")
                         .font(.subheadline.bold())
                         .foregroundStyle(.primary)
+
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer()
@@ -781,15 +1409,18 @@ struct SmartSuggestionView: View {
                     .padding(.trailing, 2)
             }
             .padding(12)
+            .frame(maxWidth: .infinity)
             .background(Color(.secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 24))
+            .contentShape(RoundedRectangle(cornerRadius: 24))
             .scaleEffect(pressed ? 0.97 : 1.0)
-            .opacity(pressed ? 0.85 : 1.0)
+            .opacity(pressed ? 0.86 : 1.0)
         }
         .buttonStyle(.plain)
+        .frame(height: 72)
+        .contentShape(RoundedRectangle(cornerRadius: 24))
     }
 }
-
 // MARK: - Wallet Card
 
 struct WalletCardView: View {
@@ -855,6 +1486,7 @@ struct WalletCardView: View {
         .frame(height: 142)
         .clipShape(RoundedRectangle(cornerRadius: 30))
         .shadow(color: .black.opacity(0.20), radius: 14, y: 10)
+        .contentShape(RoundedRectangle(cornerRadius: 30))
     }
 }
 
@@ -919,6 +1551,8 @@ struct CardDetailView: View {
     @State private var walletMessage = ""
 
     var body: some View {
+        let usableStores = StoreRelations.usableStores(for: card.brand)
+
         ZStack {
             LinearGradient(
                 colors: [Color(hex: card.gradientStartHex), Color(hex: card.gradientEndHex)],
@@ -958,6 +1592,26 @@ struct CardDetailView: View {
                         Label(card.locationHint, systemImage: "location.fill")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.80))
+
+                        if !usableStores.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Gültig bei:")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.white.opacity(0.70))
+
+                                HStack(spacing: 6) {
+                                    ForEach(usableStores, id: \.self) { store in
+                                        Text(store)
+                                            .font(.caption2.bold())
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(.white.opacity(0.15))
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
@@ -971,14 +1625,14 @@ struct CardDetailView: View {
                                     .font(.caption)
                                     .foregroundStyle(.black.opacity(0.55))
 
-                                Text(card.code)
+                                Text(card.code.isEmpty ? "Screenshot-Karte" : card.code)
                                     .font(.system(.footnote, design: .monospaced))
                                     .foregroundStyle(.black)
                             }
 
                             Spacer()
 
-                            Text(card.type.rawValue)
+                            Text(card.renderType.title)
                                 .font(.caption.bold())
                                 .foregroundStyle(.black)
                                 .padding(.horizontal, 12)
@@ -987,13 +1641,19 @@ struct CardDetailView: View {
                                 .clipShape(Capsule())
                         }
 
-                        switch card.type {
-                        case .qr:
-                            QRCodeDisplay(value: card.code)
-                        case .barcode:
-                            BarcodeDisplay(value: card.code)
-                        case .nfc:
+                        if card.type == .nfc {
                             NFCDisplayView(card: card, nfcManager: nfcManager)
+                        } else {
+                            switch card.renderType {
+                            case .image:
+                                ScreenshotCardDisplay(imageData: card.imageData)
+
+                            case .qr:
+                                QRCodeDisplay(value: card.code)
+
+                            case .barcode:
+                                BarcodeDisplay(value: card.code)
+                            }
                         }
 
                         Button {
@@ -1014,6 +1674,8 @@ struct CardDetailView: View {
                             .background(.black)
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
+                        .disabled(card.renderType == .image && card.code.isEmpty)
+                        .opacity(card.renderType == .image && card.code.isEmpty ? 0.45 : 1)
 
                         Button {
                             addToAppleWallet(card: card)
@@ -1070,6 +1732,54 @@ struct CardDetailView: View {
     }
 }
 
+struct ScreenshotCardDisplay: View {
+    let imageData: Data?
+
+    var body: some View {
+        #if os(iOS)
+        if let imageData,
+           let uiImage = UIImage(data: imageData) {
+            Image(uiImage: uiImage)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 420)
+                .padding()
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+        } else {
+            missingScreenshotView
+        }
+        #elseif os(macOS)
+        if let imageData,
+           let nsImage = NSImage(data: imageData) {
+            Image(nsImage: nsImage)
+                .resizable()
+                .scaledToFit()
+                .frame(maxHeight: 420)
+                .padding()
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+        } else {
+            missingScreenshotView
+        }
+        #endif
+    }
+
+    private var missingScreenshotView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo")
+                .font(.largeTitle)
+
+            Text("Kein Screenshot gespeichert")
+                .font(.caption)
+        }
+        .foregroundStyle(.black.opacity(0.65))
+        .frame(maxWidth: .infinity)
+        .padding()
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+    }
+}
 // MARK: - QR / Barcode
 
 struct QRCodeDisplay: View {
@@ -1282,6 +1992,51 @@ struct AddCardHostView: View {
         }
     }
 }
+#if os(iOS)
+struct ScreenshotImagePicker: UIViewControllerRepresentable {
+    var onImagePicked: (UIImage) -> Void
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration(photoLibrary: .shared())
+        config.filter = .images
+        config.selectionLimit = 1
+
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onImagePicked: onImagePicked)
+    }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let onImagePicked: (UIImage) -> Void
+
+        init(onImagePicked: @escaping (UIImage) -> Void) {
+            self.onImagePicked = onImagePicked
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            picker.dismiss(animated: true)
+
+            guard let provider = results.first?.itemProvider,
+                  provider.canLoadObject(ofClass: UIImage.self)
+            else { return }
+
+            provider.loadObject(ofClass: UIImage.self) { image, _ in
+                guard let uiImage = image as? UIImage else { return }
+
+                DispatchQueue.main.async {
+                    self.onImagePicked(uiImage)
+                }
+            }
+        }
+    }
+}
+#endif
 
 struct AddCardView: View {
     var onAdd: (TascherlCard) -> Void
@@ -1289,8 +2044,12 @@ struct AddCardView: View {
     @State private var name = ""
     @State private var company = ""
     @State private var code = ""
-    @State private var type: TascherlCardType = .qr
     @State private var category = "Neue Karte"
+
+    @State private var mode: AddCardMode = .barcode
+
+    @State private var screenshotImageData: Data?
+    @State private var showScreenshotPicker = false
 
     @State private var showScanner = false
     @StateObject private var nfcManager = NFCManager()
@@ -1306,17 +2065,17 @@ struct AddCardView: View {
                             .font(.largeTitle.bold())
                             .foregroundStyle(.primary)
 
-                        Text("Manuell eingeben oder QR / Barcode / NFC scannen.")
+                        Text("Manuell eingeben, scannen oder Screenshot hinzufügen.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 14)
 
-                    Picker("Typ", selection: $type) {
-                        ForEach(TascherlCardType.allCases) { type in
-                            Label(type.rawValue, systemImage: type.icon)
-                                .tag(type)
+                    Picker("Kartentyp", selection: $mode) {
+                        ForEach(AddCardMode.allCases) { mode in
+                            Label(mode.title, systemImage: mode.icon)
+                                .tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -1331,19 +2090,54 @@ struct AddCardView: View {
                         TextField("Kategorie", text: $category)
                             .textFieldStyle(TascherlTextFieldStyle())
 
-                        TextField("Code / Token", text: $code)
-                            .textFieldStyle(TascherlTextFieldStyle())
+                        if mode != .screenshot {
+                            TextField("Code / Token", text: $code)
+                                .textFieldStyle(TascherlTextFieldStyle())
+                        }
                     }
 
-                    HStack(spacing: 12) {
+                    if mode == .screenshot {
+                        VStack(spacing: 12) {
+                            #if os(iOS)
+                            if let screenshotImageData,
+                               let uiImage = UIImage(data: screenshotImageData) {
+                                Image(uiImage: uiImage)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(maxHeight: 260)
+                                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                                    .shadow(color: .black.opacity(0.18), radius: 12, y: 8)
+                            } else {
+                                screenshotPlaceholder
+                            }
+                            #else
+                            screenshotPlaceholder
+                            #endif
+
+                            Button {
+                                showScreenshotPicker = true
+                            } label: {
+                                Label(
+                                    screenshotImageData == nil ? "Screenshot hinzufügen" : "Screenshot ändern",
+                                    systemImage: "photo"
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+                            .tascherlActionButton()
+                        }
+                    }
+
+                    if mode == .barcode || mode == .qr {
                         Button {
                             showScanner = true
                         } label: {
-                            Label("QR / Barcode", systemImage: "camera.viewfinder")
+                            Label("Code scannen", systemImage: "camera.viewfinder")
                                 .frame(maxWidth: .infinity)
                         }
                         .tascherlActionButton()
+                    }
 
+                    if mode == .nfc {
                         Button {
                             nfcManager.beginScan()
                         } label: {
@@ -1351,17 +2145,16 @@ struct AddCardView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .tascherlActionButton()
-                    }
 
-                    if !nfcManager.lastResult.isEmpty {
-                        Button {
-                            code = nfcManager.lastResult
-                            type = .nfc
-                        } label: {
-                            Text("NFC Ergebnis übernehmen")
-                                .frame(maxWidth: .infinity)
+                        if !nfcManager.lastResult.isEmpty {
+                            Button {
+                                code = nfcManager.lastResult
+                            } label: {
+                                Text("NFC Ergebnis übernehmen")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .tascherlActionButton()
                         }
-                        .tascherlActionButton()
                     }
 
                     Button {
@@ -1373,8 +2166,19 @@ struct AddCardView: View {
                             .padding()
                             .background(
                                 canAdd
-                                ? LinearGradient(colors: [.purple, .pink, .orange], startPoint: .leading, endPoint: .trailing)
-                                : LinearGradient(colors: [.gray.opacity(0.3)], startPoint: .leading, endPoint: .trailing)
+                                ? LinearGradient(
+                                    colors: [
+                                        TascherlTheme.matteYellow,
+                                        Color(red: 0.62, green: 0.48, blue: 0.20)
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                                : LinearGradient(
+                                    colors: [.gray.opacity(0.3)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
                             )
                             .foregroundStyle(.white)
                             .clipShape(RoundedRectangle(cornerRadius: 20))
@@ -1385,37 +2189,126 @@ struct AddCardView: View {
             }
         }
         .navigationBarHidden(true)
+        .onChange(of: mode) {
+            if mode != .nfc {
+                nfcManager.lastResult = ""
+            }
+
+            if mode != .screenshot {
+                screenshotImageData = nil
+            }
+
+            if mode == .screenshot {
+                code = ""
+            }
+        }
         .sheet(isPresented: $showScanner) {
             CodeScannerView { scannedCode in
                 code = scannedCode
                 showScanner = false
+
+                if mode == .qr {
+                    mode = .qr
+                } else {
+                    mode = .barcode
+                }
+
                 impact()
             }
         }
+        #if os(iOS)
+        .sheet(isPresented: $showScreenshotPicker) {
+            ScreenshotImagePicker { image in
+                screenshotImageData = image.jpegData(compressionQuality: 0.88)
+                impact()
+            }
+        }
+        #endif
+    }
+
+    private var screenshotPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text("Für spezielle Karten kannst du einen Screenshot hinzufügen.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 22))
     }
 
     var canAdd: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !company.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !code.trimmingCharacters(in: .whitespaces).isEmpty
+        let hasName = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasCompany = !company.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasCode = !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        switch mode {
+        case .barcode, .qr, .nfc:
+            return hasName && hasCompany && hasCode
+
+        case .screenshot:
+            return hasName && hasCompany && screenshotImageData != nil
+        }
     }
 
     private func addCard() {
         let brand = normalizeBrand(company)
 
+        let finalType: TascherlCardType
+        let finalRenderType: TascherlCard.CardRenderType
+
+        switch mode {
+        case .barcode:
+            finalType = .barcode
+            finalRenderType = .barcode
+
+        case .qr:
+            finalType = .qr
+            finalRenderType = .qr
+
+        case .nfc:
+            finalType = .nfc
+            finalRenderType = .barcode
+
+        case .screenshot:
+            finalType = .barcode
+            finalRenderType = .image
+        }
+
         let newCard = TascherlCard(
             name: name,
             company: company,
             brand: brand,
-            type: type,
-            category: category,
-            info: "Neu hinzugefügt",
+            type: finalType,
+            category: category.isEmpty ? "Neue Karte" : category,
+            info: finalRenderType == .image ? "Screenshot-Karte" : "Neu hinzugefügt",
             code: code,
             locationHint: "Noch keine Standortregel eingerichtet.",
             favorite: false,
-            gradientStartHex: type == .nfc ? "#F97316" : type == .barcode ? "#06B6D4" : "#A855F7",
-            gradientEndHex: type == .nfc ? "#B91C1C" : type == .barcode ? "#1D4ED8" : "#C026D3",
-            walletPassURL: nil
+            gradientStartHex: finalRenderType == .image
+                ? "#C89A2B"
+                : finalType == .nfc
+                    ? "#F97316"
+                    : finalType == .barcode
+                        ? "#06B6D4"
+                        : "#A855F7",
+            gradientEndHex: finalRenderType == .image
+                ? "#3A3A3A"
+                : finalType == .nfc
+                    ? "#B91C1C"
+                    : finalType == .barcode
+                        ? "#1D4ED8"
+                        : "#C026D3",
+            walletPassURL: nil,
+            renderType: finalRenderType,
+            imageData: screenshotImageData
         )
 
         onAdd(newCard)
@@ -1424,21 +2317,11 @@ struct AddCardView: View {
         company = ""
         code = ""
         category = "Neue Karte"
-        type = .qr
+        mode = .barcode
+        screenshotImageData = nil
+        nfcManager.lastResult = ""
     }
 }
-
-struct TascherlTextFieldStyle: TextFieldStyle {
-    func _body(configuration: TextField<Self._Label>) -> some View {
-        configuration
-            .padding()
-            .background(Color(.secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            .foregroundStyle(.primary)
-            .tint(.pink)
-    }
-}
-
 extension View {
     func tascherlActionButton() -> some View {
         self
@@ -1450,6 +2333,16 @@ extension View {
     }
 }
 
+struct TascherlTextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .foregroundStyle(.primary)
+            .tint(TascherlTheme.matteYellow)
+    }
+}
 // MARK: - Scanner
 
 #if os(iOS)
@@ -1609,6 +2502,7 @@ struct SettingsView: View {
     @AppStorage("tascherl_darkMode") private var darkMode = true
     @AppStorage("tascherl_faceIdEnabled") private var faceIdEnabled = true
     @AppStorage("tascherl_locationEnabled") private var locationEnabled = true
+    @AppStorage("tascherl_offlineStoreDataEnabled") private var offlineStoreDataEnabled = false
     @AppStorage("tascherl_notifications") private var notifications = true
     @AppStorage("tascherl_secureCloud") private var secureCloud = true
 
@@ -1636,6 +2530,13 @@ struct SettingsView: View {
                         SettingsToggleRow(icon: "lock.fill", title: "Face ID / App-Sperre", description: "Schützt deine Karten beim App-Start.", value: $faceIdEnabled)
 
                         SettingsToggleRow(icon: "location.fill", title: "Smart Cards per Standort", description: "Schlägt automatisch passende Karten vor.", value: $locationEnabled)
+                        
+                        SettingsToggleRow(
+                            icon: "arrow.down.circle.fill",
+                            title: "Standortdaten offline speichern",
+                            description: "Speichert gefundene Filialen lokal, damit Vorschläge auch offline funktionieren.",
+                            value: $offlineStoreDataEnabled
+                        )
 
                         SettingsToggleRow(icon: "bell.fill", title: "Benachrichtigungen", description: "Demo-Schalter für Hinweise.", value: $notifications)
 
@@ -1663,7 +2564,7 @@ struct SettingsView: View {
                         Button(role: .destructive) {
                             store.resetDemo()
                         } label: {
-                            Label("Demo zurücksetzen", systemImage: "trash.fill")
+                            Label("Alle Karten löschen", systemImage: "trash.fill")
                                 .frame(maxWidth: .infinity)
                                 .padding()
                                 .background(.red.opacity(0.18))
