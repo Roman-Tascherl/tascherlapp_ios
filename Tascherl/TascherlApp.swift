@@ -268,10 +268,17 @@ func normalizeBrand(_ input: String) -> String {
         .replacingOccurrences(of: " ", with: "")
         .replacingOccurrences(of: "-", with: "")
         .replacingOccurrences(of: "_", with: "")
+        .replacingOccurrences(of: ".", with: "")
+        .replacingOccurrences(of: "&", with: "")
+        .replacingOccurrences(of: "+", with: "plus")
         .replacingOccurrences(of: "ö", with: "oe")
         .replacingOccurrences(of: "ä", with: "ae")
         .replacingOccurrences(of: "ü", with: "ue")
         .replacingOccurrences(of: "ß", with: "ss")
+}
+extension Notification.Name {
+    static let tascherlCardsChanged = Notification.Name("tascherlCardsChanged")
+    static let tascherlRefreshNearby = Notification.Name("tascherlRefreshNearby")
 }
 
 extension Color {
@@ -300,6 +307,13 @@ func impact() {
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     #endif
 }
+
+
+
+func cardCountText(_ count: Int) -> String {
+    count == 1 ? "1 Karte" : "\(count) Karten"
+}
+
 enum TascherlTheme {
     static let matteYellow = Color(red: 0.78, green: 0.62, blue: 0.28)
 }
@@ -348,25 +362,102 @@ struct AppTLogo: View {
 }
 // MARK: - Store
 struct StoreRelations {
+    static let joeStores: [String] = [
+        "BILLA",
+        "BILLA Plus",
+        "PENNY",
+        "BIPA",
+        "OMV",
+        "ADEG",
+        "ZGONC",
+        "FORSTINGER",
+        "LIBRO",
+        "PAGRO",
+        "Pearle",
+        "Sutterlüty",
+        "Universal"
+    ]
+
+    static func isJoeBrand(_ value: String) -> Bool {
+        let normalized = normalizeBrand(value)
+
+        return [
+            "jo",
+            "joe",
+            "jö",
+            "joekarte",
+            "joebonus",
+            "joebonusclub",
+            "joebonuskarte"
+        ].contains(normalized)
+    }
+
     static func usableStores(for brand: String) -> [String] {
-        let normalized = normalizeBrand(brand)
+        isJoeBrand(brand) ? joeStores : []
+    }
 
-        switch normalized {
-        case "jo", "joe", "jö":
-            return [
-                "BILLA",
-                "BILLA Plus",
-                "Penny",
-                "OMV",
-                "ADEG"
-            ]
+    static func usableStores(for card: TascherlCard) -> [String] {
+        let stores =
+            usableStores(for: card.brand) +
+            usableStores(for: card.company) +
+            usableStores(for: card.name)
 
-        default:
-            return []
+        return Array(Set(stores)).sorted()
+    }
+
+    static func lookupNames(for card: TascherlCard) -> [String] {
+        var names: [String] = [
+            card.brand,
+            card.company,
+            card.name
+        ]
+
+        names.append(contentsOf: usableStores(for: card))
+
+        return Array(Set(
+            names
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        ))
+    }
+
+    static func card(_ card: TascherlCard, matchesStoreName storeName: String) -> Bool {
+        let normalizedStore = normalizeBrand(storeName)
+
+        let lookupNames = lookupNames(for: card)
+            .map { normalizeBrand($0) }
+
+        return lookupNames.contains { lookup in
+            normalizedStore.contains(lookup) || lookup.contains(normalizedStore)
         }
     }
-}
 
+    static func defaultLocationHint(for card: TascherlCard) -> String {
+        let stores = usableStores(for: card)
+
+        if stores.isEmpty {
+            return card.locationHint
+        }
+
+        let preview = stores.prefix(5).joined(separator: ", ")
+        return "Gültig bei \(preview) und weiteren Partnern."
+    }
+
+    static func defaultLocationHint(forBrandOrCompany value: String) -> String {
+        let stores = usableStores(for: value)
+
+        if stores.isEmpty {
+            return "Noch keine Standortregel eingerichtet."
+        }
+
+        let preview = stores.prefix(5).joined(separator: ", ")
+        return "Gültig bei \(preview) und weiteren Partnern."
+    }
+
+    static func displayInfo(for card: TascherlCard) -> String {
+        usableStores(for: card).isEmpty ? card.info : "jö Partnerkarte"
+    }
+}
 
 final class CardStore: ObservableObject {
     @Published var cards: [TascherlCard] = [] {
@@ -378,6 +469,7 @@ final class CardStore: ObservableObject {
     @Published var selectedCard: TascherlCard?
     @Published var smartSuggestion: TascherlCard?
     @Published var smartSuggestionText: String = ""
+    @Published var smartSuggestionStoreName: String?
 
     private let storageKey = "tascherl_cards"
     private let lastSuggestionKey = "tascherl_last_suggestion"
@@ -411,6 +503,19 @@ final class CardStore: ObservableObject {
         }
     }
 
+    func update(_ card: TascherlCard) {
+        guard let index = cards.firstIndex(where: { $0.id == card.id }) else { return }
+
+        cards[index] = card
+
+        if selectedCard?.id == card.id {
+            selectedCard = card
+        }
+
+        if smartSuggestion?.id == card.id {
+            smartSuggestion = card
+        }
+    }
     // MARK: - Reset / Clear
 
     func resetDemo() {
@@ -426,18 +531,28 @@ final class CardStore: ObservableObject {
     func clearSmartSuggestion() {
         smartSuggestion = nil
         smartSuggestionText = ""
+        smartSuggestionStoreName = nil
     }
+    
 
-    func setSmartSuggestion(card: TascherlCard, distanceMeters: Double?, online: Bool) {
+    func setSmartSuggestion(
+        card: TascherlCard,
+        distanceMeters: Double?,
+        online: Bool,
+        nearbyStoreName: String? = nil
+    ) {
         smartSuggestion = card
+        smartSuggestionStoreName = nearbyStoreName
+
+        let displayName = nearbyStoreName ?? card.company
 
         if let distanceMeters {
             let rounded = Int(distanceMeters.rounded())
             smartSuggestionText = online
-                ? "\(card.company) ist ca. \(rounded)m entfernt"
-                : "\(card.company) ist laut Offline-Daten ca. \(rounded)m entfernt"
+                ? "\(displayName) ist ca. \(rounded)m entfernt"
+                : "\(displayName) ist laut Offline-Daten ca. \(rounded)m entfernt"
         } else {
-            smartSuggestionText = "Zuletzt in deiner Nähe: \(card.company)"
+            smartSuggestionText = "Zuletzt in deiner Nähe: \(displayName)"
         }
 
         saveLastSuggestion(card)
@@ -462,8 +577,13 @@ final class CardStore: ObservableObject {
     // MARK: - Persistence
 
     private func save() {
-        if let data = try? JSONEncoder().encode(cards) {
-            UserDefaults.standard.set(data, forKey: storageKey)
+        let snapshot = cards
+        let key = storageKey
+
+        DispatchQueue.global(qos: .utility).async {
+            if let data = try? JSONEncoder().encode(snapshot) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
         }
     }
 
@@ -505,6 +625,8 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
     private var isRefreshing = false
 
     private let cacheKey = "tascherl_cached_store_pois"
+    private let lastLatitudeKey = "tascherl_last_location_lat"
+    private let lastLongitudeKey = "tascherl_last_location_lon"
 
     override init() {
         super.init()
@@ -522,6 +644,24 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
         monitor.start(queue: monitorQueue)
     }
 
+    private func saveLastKnownLocation(_ location: CLLocation) {
+        UserDefaults.standard.set(location.coordinate.latitude, forKey: lastLatitudeKey)
+        UserDefaults.standard.set(location.coordinate.longitude, forKey: lastLongitudeKey)
+    }
+
+    private func loadLastKnownLocation() -> CLLocation? {
+        guard UserDefaults.standard.object(forKey: lastLatitudeKey) != nil,
+              UserDefaults.standard.object(forKey: lastLongitudeKey) != nil
+        else {
+            return nil
+        }
+
+        let lat = UserDefaults.standard.double(forKey: lastLatitudeKey)
+        let lon = UserDefaults.standard.double(forKey: lastLongitudeKey)
+
+        return CLLocation(latitude: lat, longitude: lon)
+    }
+
     func refresh(
         store: CardStore,
         locationEnabled: Bool,
@@ -532,49 +672,37 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
         self.locationEnabled = locationEnabled
         self.offlineStoreDataEnabled = offlineStoreDataEnabled
 
-        // ✅ Wenn ausgeschaltet → alles löschen
         guard locationEnabled else {
             store.clearSmartSuggestion()
             statusText = "Standortvorschläge deaktiviert"
             return
         }
 
-        // ✅ 1. SOFORT letzten Vorschlag anzeigen (wichtig für Offline & Speed!)
-        if let last = store.loadLastSuggestion() {
+        if let last = store.loadLastSuggestion(), store.smartSuggestion == nil {
             store.smartSuggestion = last
             store.smartSuggestionText = "Zuletzt in deiner Nähe: \(last.company)"
         }
 
-        // ✅ 2. Cache sofort nutzen wenn erlaubt
-        if offlineStoreDataEnabled, let lastLocation = locationManager.location {
-            findNearestFromCache(currentLocation: lastLocation, store: store)
-        }
+        let currentBestLocation = locationManager.location ?? loadLastKnownLocation()
 
-        // ✅ 3. Refresh throttling (verhindert Spam)
-        let now = Date()
-        if !force && now.timeIntervalSince(lastRefreshDate) < 12 {
-            return
-        }
+        if let currentBestLocation {
+            saveLastKnownLocation(currentBestLocation)
 
-        lastRefreshDate = now
+            if offlineStoreDataEnabled {
+                findNearestFromCache(currentLocation: currentBestLocation, store: store)
+            }
 
-        // ✅ 4. Wenn iOS schon Location hat → sofort verwenden
-        if let cachedLocation = locationManager.location {
-            if isOnline {
-                if !isRefreshing {
+            if isOnline && !isRefreshing {
+                let now = Date()
+
+                if force || now.timeIntervalSince(lastRefreshDate) >= 12 {
+                    lastRefreshDate = now
                     isRefreshing = true
-                    fetchNearbyStoresOnline(currentLocation: cachedLocation, store: store)
+                    fetchNearbyStoresOnline(currentLocation: currentBestLocation, store: store)
                 }
-            } else {
-                // ✅ Offline fallback
-                if offlineStoreDataEnabled {
-                    findNearestFromCache(currentLocation: cachedLocation, store: store)
-                }
-                // ❌ KEIN clear hier → sonst verschwindet dein letzter Vorschlag!
             }
         }
 
-        // ✅ 5. Frische Location im Hintergrund holen
         locationManager.requestWhenInUseAuthorization()
         locationManager.requestLocation()
     }
@@ -584,34 +712,37 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
               let store
         else { return }
 
+        saveLastKnownLocation(currentLocation)
+
+        if offlineStoreDataEnabled {
+            findNearestFromCache(currentLocation: currentLocation, store: store)
+        }
+
         if isRefreshing {
             return
         }
 
-        isRefreshing = true
-
         if isOnline {
+            isRefreshing = true
             statusText = "Online: Suche nahe Filialen"
             fetchNearbyStoresOnline(currentLocation: currentLocation, store: store)
         } else {
             statusText = "Offline"
 
-            if offlineStoreDataEnabled {
-                findNearestFromCache(currentLocation: currentLocation, store: store)
-            } else {
-                store.clearSmartSuggestion()
+            if !offlineStoreDataEnabled && store.smartSuggestion == nil {
                 statusText = "Offline: keine lokalen Standortdaten aktiviert"
             }
-
-            isRefreshing = false
         }
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         DispatchQueue.main.async {
-            self.store?.clearSmartSuggestion()
-            self.statusText = "Standort konnte nicht geladen werden"
+            self.statusText = "Standort konnte nicht aktualisiert werden"
             self.isRefreshing = false
+
+            if self.store?.smartSuggestion == nil {
+                self.store?.clearSmartSuggestion()
+            }
         }
 
         print("Location error:", error.localizedDescription)
@@ -624,7 +755,6 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
         let brandRegex = buildBrandRegex(from: store.cards)
 
         guard !brandRegex.isEmpty else {
-            store.clearSmartSuggestion()
             statusText = "Keine Kartenmarken für Standortsuche"
             isRefreshing = false
             return
@@ -633,13 +763,13 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
         let query = """
         [out:json][timeout:8];
         (
-          node(around:900,\(lat),\(lon))["brand"~"\(brandRegex)",i];
-          way(around:900,\(lat),\(lon))["brand"~"\(brandRegex)",i];
-          relation(around:900,\(lat),\(lon))["brand"~"\(brandRegex)",i];
+          node(around:1800,\(lat),\(lon))["brand"~"\(brandRegex)",i];
+          way(around:1800,\(lat),\(lon))["brand"~"\(brandRegex)",i];
+          relation(around:1800,\(lat),\(lon))["brand"~"\(brandRegex)",i];
 
-          node(around:900,\(lat),\(lon))["name"~"\(brandRegex)",i];
-          way(around:900,\(lat),\(lon))["name"~"\(brandRegex)",i];
-          relation(around:900,\(lat),\(lon))["name"~"\(brandRegex)",i];
+          node(around:1800,\(lat),\(lon))["name"~"\(brandRegex)",i];
+          way(around:1800,\(lat),\(lon))["name"~"\(brandRegex)",i];
+          relation(around:1800,\(lat),\(lon))["name"~"\(brandRegex)",i];
         );
         out center tags;
         """
@@ -665,11 +795,11 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
 
                     if self.offlineStoreDataEnabled {
                         self.findNearestFromCache(currentLocation: currentLocation, store: store)
-                    } else {
+                    } else if store.smartSuggestion == nil {
                         store.clearSmartSuggestion()
-                        self.statusText = "Online-Suche fehlgeschlagen"
                     }
 
+                    self.statusText = "Online-Suche fehlgeschlagen"
                     self.isRefreshing = false
                 }
 
@@ -678,8 +808,12 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
 
             guard let data else {
                 DispatchQueue.main.async {
-                    store.clearSmartSuggestion()
                     self.statusText = "Keine Online-Daten erhalten"
+
+                    if store.smartSuggestion == nil {
+                        store.clearSmartSuggestion()
+                    }
+
                     self.isRefreshing = false
                 }
 
@@ -730,11 +864,11 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
 
                     if self.offlineStoreDataEnabled {
                         self.findNearestFromCache(currentLocation: currentLocation, store: store)
-                    } else {
+                    } else if store.smartSuggestion == nil {
                         store.clearSmartSuggestion()
-                        self.statusText = "Online-Daten konnten nicht gelesen werden"
                     }
 
+                    self.statusText = "Online-Daten konnten nicht gelesen werden"
                     self.isRefreshing = false
                 }
             }
@@ -753,8 +887,12 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
         online: Bool
     ) {
         guard !pois.isEmpty else {
-            store.clearSmartSuggestion()
             statusText = online ? "Keine nahe Filiale gefunden" : "Keine Offline-Daten gefunden"
+
+            if store.smartSuggestion == nil {
+                store.clearSmartSuggestion()
+            }
+
             return
         }
 
@@ -767,38 +905,46 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
             .first
 
         guard let nearest else {
-            store.clearSmartSuggestion()
+            if store.smartSuggestion == nil {
+                store.clearSmartSuggestion()
+            }
             return
         }
 
-        guard nearest.distance <= 1500 else {
-            store.clearSmartSuggestion()
+        guard nearest.distance <= 1800 else {
             statusText = "Keine passende Karte in der Nähe"
+
+            if store.smartSuggestion == nil {
+                store.clearSmartSuggestion()
+            }
+
             return
         }
 
-        let matchedBrand = normalizeBrand(nearest.poi.brand)
+        let matchingCards = store.cards.filter { card in
+            StoreRelations.card(card, matchesStoreName: nearest.poi.brand) ||
+            StoreRelations.card(card, matchesStoreName: nearest.poi.name)
+        }
 
-        if let matchedCard = store.cards.first(where: {
-            let cardBrand = normalizeBrand($0.brand)
-            let cardCompany = normalizeBrand($0.company)
-            let cardName = normalizeBrand($0.name)
+        let matchedCard = matchingCards.first(where: {
+            !StoreRelations.usableStores(for: $0).isEmpty
+        }) ?? matchingCards.first
 
-            return matchedBrand.contains(cardBrand)
-                || cardBrand.contains(matchedBrand)
-                || matchedBrand.contains(cardCompany)
-                || cardCompany.contains(matchedBrand)
-                || matchedBrand.contains(cardName)
-                || cardName.contains(matchedBrand)
-        }) {
+        if let matchedCard {
+            let nearbyStoreName = nearest.poi.name.isEmpty ? nearest.poi.brand : nearest.poi.name
+
             store.setSmartSuggestion(
                 card: matchedCard,
                 distanceMeters: nearest.distance,
-                online: online
+                online: online,
+                nearbyStoreName: nearbyStoreName
             )
         } else {
-            store.clearSmartSuggestion()
             statusText = "Filiale erkannt, aber keine passende Karte gespeichert"
+
+            if store.smartSuggestion == nil {
+                store.clearSmartSuggestion()
+            }
         }
     }
 
@@ -815,29 +961,30 @@ final class NearbyCardManager: NSObject, ObservableObject, CLLocationManagerDele
 
         guard let data = try? JSONEncoder().encode(existing) else { return }
         UserDefaults.standard.set(data, forKey: cacheKey)
+
+        print("Saved cached POIs:", existing.count)
     }
 
     private func loadCachedPOIs() -> [StorePOI] {
         guard let data = UserDefaults.standard.data(forKey: cacheKey),
               let decoded = try? JSONDecoder().decode([StorePOI].self, from: data)
         else {
+            print("Loaded cached POIs: 0")
             return []
         }
 
+        print("Loaded cached POIs:", decoded.count)
         return decoded
     }
 
     private func buildBrandRegex(from cards: [TascherlCard]) -> String {
-        let names = cards.flatMap { card in
-            [
-                card.brand,
-                card.company,
-                card.name
-            ]
-        }
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-        .map { escapeRegex($0) }
+        let names = cards
+            .flatMap { card in
+                StoreRelations.lookupNames(for: card)
+            }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { escapeRegex($0) }
 
         let unique = Array(Set(names))
 
@@ -1158,6 +1305,12 @@ struct MainShellView: View {
         .toolbarBackground(.automatic, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         #endif
+        
+        .onChange(of: selectedTab) {
+            if selectedTab == .cards {
+                NotificationCenter.default.post(name: .tascherlRefreshNearby, object: nil)
+            }
+        }
     }
 }
 struct SwipeableTabScreen<Content: View>: View {
@@ -1229,11 +1382,14 @@ struct SwipeableTabScreen<Content: View>: View {
 // MARK: - Home
 struct CardsHomeView: View {
     @EnvironmentObject var store: CardStore
+    @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("tascherl_locationEnabled") private var locationEnabled = true
     @AppStorage("tascherl_offlineStoreDataEnabled") private var offlineStoreDataEnabled = false
+    
 
     @StateObject private var nearbyManager = NearbyCardManager()
+    @State private var editingCard: TascherlCard?
 
     var body: some View {
         NavigationStack {
@@ -1247,7 +1403,8 @@ struct CardsHomeView: View {
                         if locationEnabled, let suggestion = store.smartSuggestion {
                             SmartSuggestionView(
                                 card: suggestion,
-                                subtitle: store.smartSuggestionText
+                                subtitle: store.smartSuggestionText,
+                                nearbyStoreName: store.smartSuggestionStoreName
                             ) {
                                 openCard(suggestion)
                             }
@@ -1267,6 +1424,12 @@ struct CardsHomeView: View {
                                 .frame(height: 142)
                                 .contentShape(RoundedRectangle(cornerRadius: 30))
                                 .contextMenu {
+                                    Button {
+                                        editingCard = card
+                                    } label: {
+                                        Label("Karte bearbeiten", systemImage: "square.and.pencil")
+                                    }
+
                                     Button(role: .destructive) {
                                         store.delete(card)
                                     } label: {
@@ -1281,35 +1444,41 @@ struct CardsHomeView: View {
                 }
             }
             .navigationBarHidden(true)
+            .task {
+                refreshNearby(force: true)
+            }
             .onAppear {
-                nearbyManager.refresh(
-                    store: store,
-                    locationEnabled: locationEnabled,
-                    offlineStoreDataEnabled: offlineStoreDataEnabled,
-                    force: true
-                )
+                refreshNearby(force: true)
             }
             .onChange(of: locationEnabled) {
-                nearbyManager.refresh(
-                    store: store,
-                    locationEnabled: locationEnabled,   // ✅ FIX
-                    offlineStoreDataEnabled: offlineStoreDataEnabled,
-                    force: true
-                )
+                refreshNearby(force: true)
             }
-
             .onChange(of: offlineStoreDataEnabled) {
-                nearbyManager.refresh(
-                    store: store,
-                    locationEnabled: locationEnabled,
-                    offlineStoreDataEnabled: offlineStoreDataEnabled, // ✅ FIX
-                    force: true
-                )
+                refreshNearby(force: true)
             }
-
+            .onChange(of: scenePhase) {
+                if scenePhase == .active {
+                    refreshNearby(force: true)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .tascherlCardsChanged)) { _ in
+                refreshNearby(force: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .tascherlRefreshNearby)) { _ in
+                refreshNearby(force: true)
+            }
+           
+            
             .sheet(item: $store.selectedCard) { card in
                 CardDetailView(card: card)
                     .presentationDetentsIfAvailable()
+            }
+            .sheet(item: $editingCard) { card in
+                EditCardView(card: card) { updatedCard in
+                    store.update(updatedCard)
+                    NotificationCenter.default.post(name: .tascherlCardsChanged, object: nil)
+                    NotificationCenter.default.post(name: .tascherlRefreshNearby, object: nil)
+                }
             }
         }
     }
@@ -1320,6 +1489,14 @@ struct CardsHomeView: View {
         withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
             store.selectedCard = card
         }
+    }
+    private func refreshNearby(force: Bool) {
+        nearbyManager.refresh(
+            store: store,
+            locationEnabled: locationEnabled,
+            offlineStoreDataEnabled: offlineStoreDataEnabled,
+            force: force
+        )
     }
 }
 extension View {
@@ -1351,7 +1528,7 @@ struct CompactHeaderView: View {
 
             Spacer()
 
-            Text("\(cardCount) Karten")
+            Text(cardCountText(cardCount))
                 .font(.caption.bold())
                 .foregroundStyle(.secondary)
         }
@@ -1362,6 +1539,7 @@ struct CompactHeaderView: View {
 struct SmartSuggestionView: View {
     let card: TascherlCard
     let subtitle: String
+    let nearbyStoreName: String?
     var onOpen: () -> Void
 
     @State private var pressed = false
@@ -1389,9 +1567,19 @@ struct SmartSuggestionView: View {
                         .font(.caption2.bold())
                         .foregroundStyle(.secondary)
 
-                    Text("\(card.company) Karte schnell öffnen")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.primary)
+                    if let nearbyStoreName {
+                        Text("\(nearbyStoreName) erkannt")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.primary)
+
+                        Text("\(card.company) Karte schnell öffnen")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("\(card.company) Karte schnell öffnen")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.primary)
+                    }
 
                     if !subtitle.isEmpty {
                         Text(subtitle)
@@ -1417,7 +1605,7 @@ struct SmartSuggestionView: View {
             .opacity(pressed ? 0.86 : 1.0)
         }
         .buttonStyle(.plain)
-        .frame(height: 72)
+        .frame(height: 82)
         .contentShape(RoundedRectangle(cornerRadius: 24))
     }
 }
@@ -1593,25 +1781,7 @@ struct CardDetailView: View {
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.80))
 
-                        if !usableStores.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Gültig bei:")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.white.opacity(0.70))
-
-                                HStack(spacing: 6) {
-                                    ForEach(usableStores, id: \.self) { store in
-                                        Text(store)
-                                            .font(.caption2.bold())
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 4)
-                                            .background(.white.opacity(0.15))
-                                            .clipShape(Capsule())
-                                    }
-                                }
-                            }
-                            .padding(.top, 4)
-                        }
+                        PartnerStoresView(stores: usableStores)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
@@ -1729,6 +1899,37 @@ struct CardDetailView: View {
         #else
         NSWorkspace.shared.open(url)
         #endif
+    }
+}
+
+struct PartnerStoresView: View {
+    let stores: [String]
+
+    var body: some View {
+        if !stores.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Gültig bei:")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.70))
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(stores, id: \.self) { store in
+                            Text(store)
+                                .font(.caption2.bold())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.white.opacity(0.16))
+                                .clipShape(Capsule())
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(.top, 4)
+        }
     }
 }
 
@@ -1988,6 +2189,8 @@ struct AddCardHostView: View {
         NavigationStack {
             AddCardView { card in
                 store.addCard(card)
+                NotificationCenter.default.post(name: .tascherlCardsChanged, object: nil)
+                NotificationCenter.default.post(name: .tascherlRefreshNearby, object: nil)
             }
         }
     }
@@ -2033,6 +2236,29 @@ struct ScreenshotImagePicker: UIViewControllerRepresentable {
                     self.onImagePicked(uiImage)
                 }
             }
+        }
+    }
+}
+#endif
+#if os(iOS)
+extension UIImage {
+    func tascherlResized(maxDimension: CGFloat = 1400) -> UIImage {
+        let maxSide = max(size.width, size.height)
+
+        guard maxSide > maxDimension else {
+            return self
+        }
+
+        let scale = maxDimension / maxSide
+        let newSize = CGSize(
+            width: size.width * scale,
+            height: size.height * scale
+        )
+
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+
+        return renderer.image { _ in
+            self.draw(in: CGRect(origin: .zero, size: newSize))
         }
     }
 }
@@ -2219,7 +2445,8 @@ struct AddCardView: View {
         #if os(iOS)
         .sheet(isPresented: $showScreenshotPicker) {
             ScreenshotImagePicker { image in
-                screenshotImageData = image.jpegData(compressionQuality: 0.88)
+                let resized = image.tascherlResized(maxDimension: 1400)
+                screenshotImageData = resized.jpegData(compressionQuality: 0.78)
                 impact()
             }
         }
@@ -2282,15 +2509,18 @@ struct AddCardView: View {
             finalRenderType = .image
         }
 
+        let locationHint = StoreRelations.defaultLocationHint(forBrandOrCompany: company)
         let newCard = TascherlCard(
             name: name,
             company: company,
             brand: brand,
             type: finalType,
             category: category.isEmpty ? "Neue Karte" : category,
-            info: finalRenderType == .image ? "Screenshot-Karte" : "Neu hinzugefügt",
+            info: finalRenderType == .image
+                ? (StoreRelations.usableStores(for: company).isEmpty ? "Screenshot-Karte" : "jö Partnerkarte")
+                : "Neu hinzugefügt",
             code: code,
-            locationHint: "Noch keine Standortregel eingerichtet.",
+            locationHint: locationHint,
             favorite: false,
             gradientStartHex: finalRenderType == .image
                 ? "#C89A2B"
@@ -2320,6 +2550,264 @@ struct AddCardView: View {
         mode = .barcode
         screenshotImageData = nil
         nfcManager.lastResult = ""
+    }
+}
+
+struct EditCardView: View {
+    let card: TascherlCard
+    var onSave: (TascherlCard) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name: String
+    @State private var company: String
+    @State private var code: String
+    @State private var category: String
+    @State private var mode: AddCardMode
+    @State private var screenshotImageData: Data?
+    @State private var showScreenshotPicker = false
+
+    init(card: TascherlCard, onSave: @escaping (TascherlCard) -> Void) {
+        self.card = card
+        self.onSave = onSave
+
+        _name = State(initialValue: card.name)
+        _company = State(initialValue: card.company)
+        _code = State(initialValue: card.code)
+        _category = State(initialValue: card.category)
+        _screenshotImageData = State(initialValue: card.imageData)
+
+        let initialMode: AddCardMode
+
+        if card.renderType == .image {
+            initialMode = .screenshot
+        } else {
+            switch card.type {
+            case .qr:
+                initialMode = .qr
+            case .barcode:
+                initialMode = .barcode
+            case .nfc:
+                initialMode = .nfc
+            }
+        }
+
+        _mode = State(initialValue: initialMode)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                BackgroundView()
+
+                ScrollView {
+                    VStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Karte bearbeiten")
+                                .font(.largeTitle.bold())
+
+                            Text("Passe Name, Unternehmen, Typ oder Screenshot an.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 14)
+
+                        Picker("Kartentyp", selection: $mode) {
+                            ForEach(AddCardMode.allCases) { mode in
+                                Label(mode.title, systemImage: mode.icon)
+                                    .tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        VStack(spacing: 12) {
+                            TextField("Name der Karte", text: $name)
+                                .textFieldStyle(TascherlTextFieldStyle())
+
+                            TextField("Unternehmen", text: $company)
+                                .textFieldStyle(TascherlTextFieldStyle())
+
+                            TextField("Kategorie", text: $category)
+                                .textFieldStyle(TascherlTextFieldStyle())
+
+                            if mode != .screenshot {
+                                TextField("Code / Token", text: $code)
+                                    .textFieldStyle(TascherlTextFieldStyle())
+                            }
+                        }
+
+                        if mode == .screenshot {
+                            VStack(spacing: 12) {
+                                #if os(iOS)
+                                if let screenshotImageData,
+                                   let uiImage = UIImage(data: screenshotImageData) {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(maxHeight: 260)
+                                        .clipShape(RoundedRectangle(cornerRadius: 22))
+                                        .shadow(color: .black.opacity(0.18), radius: 12, y: 8)
+                                } else {
+                                    screenshotPlaceholder
+                                }
+                                #else
+                                screenshotPlaceholder
+                                #endif
+
+                                Button {
+                                    showScreenshotPicker = true
+                                } label: {
+                                    Label(
+                                        screenshotImageData == nil ? "Screenshot hinzufügen" : "Screenshot ändern",
+                                        systemImage: "photo"
+                                    )
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .tascherlActionButton()
+                            }
+                        }
+
+                        Button {
+                            saveChanges()
+                        } label: {
+                            Text("Änderungen speichern")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(
+                                    canSave
+                                    ? LinearGradient(
+                                        colors: [
+                                            TascherlTheme.matteYellow,
+                                            Color(red: 0.62, green: 0.48, blue: 0.20)
+                                        ],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                    : LinearGradient(
+                                        colors: [.gray.opacity(0.3)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 20))
+                        }
+                        .disabled(!canSave)
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Bearbeiten")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Abbrechen") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .onChange(of: mode) {
+            if mode != .screenshot {
+                screenshotImageData = nil
+            }
+
+            if mode == .screenshot {
+                code = ""
+            }
+        }
+        #if os(iOS)
+        .sheet(isPresented: $showScreenshotPicker) {
+            ScreenshotImagePicker { image in
+                let resized = image.tascherlResized(maxDimension: 1400)
+                screenshotImageData = resized.jpegData(compressionQuality: 0.78)
+                impact()
+            }
+        }
+        #endif
+    }
+
+    private var screenshotPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text("Für spezielle Karten kannst du einen Screenshot hinzufügen.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+    }
+
+    private var canSave: Bool {
+        let hasName = !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasCompany = !company.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasCode = !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        switch mode {
+        case .barcode, .qr, .nfc:
+            return hasName && hasCompany && hasCode
+
+        case .screenshot:
+            return hasName && hasCompany && screenshotImageData != nil
+        }
+    }
+
+    private func saveChanges() {
+        let brand = normalizeBrand(company)
+
+        let finalType: TascherlCardType
+        let finalRenderType: TascherlCard.CardRenderType
+
+        switch mode {
+        case .barcode:
+            finalType = .barcode
+            finalRenderType = .barcode
+
+        case .qr:
+            finalType = .qr
+            finalRenderType = .qr
+
+        case .nfc:
+            finalType = .nfc
+            finalRenderType = .barcode
+
+        case .screenshot:
+            finalType = .barcode
+            finalRenderType = .image
+        }
+
+        let updatedCard = TascherlCard(
+            id: card.id,
+            name: name,
+            company: company,
+            brand: brand,
+            type: finalType,
+            category: category.isEmpty ? "Neue Karte" : category,
+            info: finalRenderType == .image
+                ? (StoreRelations.usableStores(for: company).isEmpty ? "Screenshot-Karte" : "jö Partnerkarte")
+                : card.info,
+            code: code,
+            locationHint: StoreRelations.defaultLocationHint(forBrandOrCompany: company),
+            favorite: card.favorite,
+            gradientStartHex: card.gradientStartHex,
+            gradientEndHex: card.gradientEndHex,
+            walletPassURL: card.walletPassURL,
+            renderType: finalRenderType,
+            imageData: screenshotImageData
+        )
+
+        onSave(updatedCard)
+        impact()
+        dismiss()
     }
 }
 extension View {
@@ -2548,7 +3036,7 @@ struct SettingsView: View {
                                 .foregroundStyle(.primary)
 
                             HStack {
-                                StatusPill(text: "\(store.cards.count) Karten")
+                                StatusPill(text: cardCountText(store.cards.count))
                                 StatusPill(text: "QR aktiv")
                             }
 
