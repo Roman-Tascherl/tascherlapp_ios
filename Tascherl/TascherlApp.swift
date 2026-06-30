@@ -4,6 +4,8 @@ import LocalAuthentication
 import CoreImage.CIFilterBuiltins
 import CoreLocation
 import Network
+import CryptoKit
+import Security
 
 #if os(iOS)
 import UIKit
@@ -309,11 +311,248 @@ func impact() {
 }
 
 
-
 func cardCountText(_ count: Int) -> String {
     count == 1 ? "1 Karte" : "\(count) Karten"
 }
 
+enum TascherlCrypto {
+    static let keySize = 32
+
+    static func generateSyncKey() -> Data {
+        var bytes = [UInt8](repeating: 0, count: keySize)
+
+        let status = bytes.withUnsafeMutableBytes { buffer in
+            SecRandomCopyBytes(kSecRandomDefault, keySize, buffer.baseAddress!)
+        }
+
+        precondition(status == errSecSuccess, "Secure random failed")
+
+        return Data(bytes)
+    }
+
+    static func recoveryKeyString(from key: Data) -> String {
+        key.base64EncodedString()
+    }
+
+    static func keyData(fromRecoveryKey string: String) -> Data? {
+        Data(base64Encoded: string.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    static func encrypt(_ plaintext: Data, with keyData: Data) throws -> String {
+        let key = SymmetricKey(data: keyData)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+
+        guard let combined = sealed.combined else {
+            throw NSError(domain: "Crypto", code: 1)
+        }
+
+        return combined.base64EncodedString()
+    }
+
+    static func decrypt(_ ciphertextBase64: String, with keyData: Data) throws -> Data {
+        guard let combined = Data(base64Encoded: ciphertextBase64) else {
+            throw NSError(domain: "Crypto", code: 2)
+        }
+
+        let key = SymmetricKey(data: keyData)
+        let box = try AES.GCM.SealedBox(combined: combined)
+
+        return try AES.GCM.open(box, using: key)
+    }
+}
+
+enum TascherlCloudConfig {
+    static let baseURL = URL(string: "https://api.tascherl.example.com")!
+}
+
+enum KeychainHelper {
+    static func save(_ data: Data, service: String, account: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+
+        SecItemDelete(query as CFDictionary)
+
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+
+        guard status == errSecSuccess else {
+            throw NSError(domain: "Keychain", code: Int(status))
+        }
+    }
+
+    static func load(service: String, account: String) throws -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+
+        if status == errSecItemNotFound {
+            return nil
+        }
+
+        guard status == errSecSuccess else {
+            throw NSError(domain: "Keychain", code: Int(status))
+        }
+
+        return item as? Data
+    }
+
+    static func delete(service: String, account: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+struct CloudAuthResponse: Codable {
+    let token: String
+    let user: CloudUser
+}
+
+struct CloudUser: Codable {
+    let id: String
+    let email: String
+}
+
+struct SyncDownloadResponse: Codable {
+    let ciphertext: String?
+    let updatedAt: String?
+}
+
+struct SyncUploadRequest: Codable {
+    let ciphertext: String
+}
+
+final class TascherlCloudAPI {
+    static let shared = TascherlCloudAPI()
+
+    private init() {}
+
+    private var baseURL: URL {
+        TascherlCloudConfig.baseURL
+    }
+
+    func register(email: String, password: String) async throws -> String {
+        try await auth(path: "/v1/auth/register", email: email, password: password)
+    }
+
+    func login(email: String, password: String) async throws -> String {
+        try await auth(path: "/v1/auth/login", email: email, password: password)
+    }
+
+    private func auth(path: String, email: String, password: String) async throws -> String {
+        let url = baseURL.appendingPathComponent(path)
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body = [
+            "email": email,
+            "password": password
+        ]
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw NSError(domain: "CloudAuth", code: 1)
+        }
+
+        let decoded = try JSONDecoder().decode(CloudAuthResponse.self, from: data)
+        return decoded.token
+    }
+
+    func upload(ciphertext: String, token: String) async throws {
+        let url = baseURL.appendingPathComponent("/v1/sync")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(SyncUploadRequest(ciphertext: ciphertext))
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw NSError(domain: "CloudUpload", code: 1)
+        }
+    }
+
+    func download(token: String) async throws -> SyncDownloadResponse {
+        let url = baseURL.appendingPathComponent("/v1/sync")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode)
+        else {
+            throw NSError(domain: "CloudDownload", code: 1)
+        }
+
+        return try JSONDecoder().decode(SyncDownloadResponse.self, from: data)
+    }
+}
+
+enum TascherlCloudStorage {
+    static let service = "com.tascherl.cloud"
+    static let tokenAccount = "accessToken"
+    static let syncKeyAccount = "syncKey"
+
+    static func saveToken(_ token: String) throws {
+        try KeychainHelper.save(Data(token.utf8), service: service, account: tokenAccount)
+    }
+
+    static func loadToken() throws -> String? {
+        guard let data = try KeychainHelper.load(service: service, account: tokenAccount) else {
+            return nil
+        }
+
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func saveSyncKey(_ key: Data) throws {
+        try KeychainHelper.save(key, service: service, account: syncKeyAccount)
+    }
+
+    static func loadSyncKey() throws -> Data? {
+        try KeychainHelper.load(service: service, account: syncKeyAccount)
+    }
+
+    static func clear() {
+        KeychainHelper.delete(service: service, account: tokenAccount)
+        KeychainHelper.delete(service: service, account: syncKeyAccount)
+    }
+}
 enum TascherlTheme {
     static let matteYellow = Color(red: 0.78, green: 0.62, blue: 0.28)
 }
@@ -360,6 +599,8 @@ struct AppTLogo: View {
             .frame(width: size, height: size)
     }
 }
+
+
 // MARK: - Store
 struct StoreRelations {
     static let joeStores: [String] = [
@@ -482,6 +723,7 @@ final class CardStore: ObservableObject {
 
     func add(_ card: TascherlCard) {
         cards.append(card)
+        uploadCloudBackupIfEnabled()
     }
 
     // Kompatibilität mit deinem bestehenden AddCardHostView
@@ -501,6 +743,7 @@ final class CardStore: ObservableObject {
         if smartSuggestion?.id == card.id {
             clearSmartSuggestion()
         }
+        uploadCloudBackupIfEnabled()
     }
 
     func update(_ card: TascherlCard) {
@@ -515,6 +758,7 @@ final class CardStore: ObservableObject {
         if smartSuggestion?.id == card.id {
             smartSuggestion = card
         }
+        uploadCloudBackupIfEnabled()
     }
     // MARK: - Reset / Clear
 
@@ -524,6 +768,8 @@ final class CardStore: ObservableObject {
         cards.removeAll()
         clearSmartSuggestion()
         UserDefaults.standard.removeObject(forKey: lastSuggestionKey)
+        
+        uploadCloudBackupIfEnabled()
     }
 
     // MARK: - Smart Suggestion
@@ -572,6 +818,41 @@ final class CardStore: ObservableObject {
         }
 
         return decoded
+    }
+    func replaceAllCardsFromCloud(_ newCards: [TascherlCard]) {
+        cards = newCards
+    }
+
+    func encryptedCardsBlob(syncKey: Data) throws -> String {
+        let data = try JSONEncoder().encode(cards)
+        return try TascherlCrypto.encrypt(data, with: syncKey)
+    }
+
+    func importEncryptedCardsBlob(_ ciphertext: String, syncKey: Data) throws {
+        let decrypted = try TascherlCrypto.decrypt(ciphertext, with: syncKey)
+        let decoded = try JSONDecoder().decode([TascherlCard].self, from: decrypted)
+        replaceAllCardsFromCloud(decoded)
+    }
+
+    func uploadCloudBackupIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: "tascherl_cloudSyncEnabled") else { return }
+
+        let snapshot = cards
+
+        Task {
+            do {
+                guard let token = try TascherlCloudStorage.loadToken(),
+                      let syncKey = try TascherlCloudStorage.loadSyncKey()
+                else { return }
+
+                let data = try JSONEncoder().encode(snapshot)
+                let encrypted = try TascherlCrypto.encrypt(data, with: syncKey)
+
+                try await TascherlCloudAPI.shared.upload(ciphertext: encrypted, token: token)
+            } catch {
+                print("Cloud upload failed:", error.localizedDescription)
+            }
+        }
     }
 
     // MARK: - Persistence
@@ -1275,29 +1556,23 @@ struct MainShellView: View {
 
     var body: some View {
         TabView(selection: animatedTabSelection) {
-            SwipeableTabScreen(selectedTab: $selectedTab) {
-                CardsHomeView()
-            }
-            .tag(AppTab.cards)
-            .tabItem {
-                Label(AppTab.cards.title, systemImage: AppTab.cards.icon)
-            }
+            CardsHomeView()
+                .tag(AppTab.cards)
+                .tabItem {
+                    Label(AppTab.cards.title, systemImage: AppTab.cards.icon)
+                }
 
-            SwipeableTabScreen(selectedTab: $selectedTab) {
-                AddCardHostView()
-            }
-            .tag(AppTab.add)
-            .tabItem {
-                Label(AppTab.add.title, systemImage: AppTab.add.icon)
-            }
+            AddCardHostView()
+                .tag(AppTab.add)
+                .tabItem {
+                    Label(AppTab.add.title, systemImage: AppTab.add.icon)
+                }
 
-            SwipeableTabScreen(selectedTab: $selectedTab) {
-                SettingsView()
-            }
-            .tag(AppTab.settings)
-            .tabItem {
-                Label(AppTab.settings.title, systemImage: AppTab.settings.icon)
-            }
+            SettingsView()
+                .tag(AppTab.settings)
+                .tabItem {
+                    Label(AppTab.settings.title, systemImage: AppTab.settings.icon)
+                }
         }
         .tint(TascherlTheme.matteYellow)
         .animation(.easeInOut(duration: 0.24), value: selectedTab)
@@ -1305,7 +1580,6 @@ struct MainShellView: View {
         .toolbarBackground(.automatic, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         #endif
-        
         .onChange(of: selectedTab) {
             if selectedTab == .cards {
                 NotificationCenter.default.post(name: .tascherlRefreshNearby, object: nil)
@@ -2993,6 +3267,8 @@ struct SettingsView: View {
     @AppStorage("tascherl_offlineStoreDataEnabled") private var offlineStoreDataEnabled = false
     @AppStorage("tascherl_notifications") private var notifications = true
     @AppStorage("tascherl_secureCloud") private var secureCloud = true
+    @AppStorage("tascherl_cloudSyncEnabled") private var cloudSyncEnabled = false
+    @State private var showCloudSync = false
 
     var body: some View {
         NavigationStack {
@@ -3028,7 +3304,40 @@ struct SettingsView: View {
 
                         SettingsToggleRow(icon: "bell.fill", title: "Benachrichtigungen", description: "Demo-Schalter für Hinweise.", value: $notifications)
 
-                        SettingsToggleRow(icon: "checkmark.shield.fill", title: "Sichere Cloud", description: "Zeigt Datenschutz-Hinweise an.", value: $secureCloud)
+                        Button {
+                            showCloudSync = true
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "icloud.fill")
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 42, height: 42)
+                                    .background(Color(.tertiarySystemBackground))
+                                    .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Verschlüsselte Cloud")
+                                        .font(.subheadline.bold())
+                                        .foregroundStyle(.primary)
+
+                                    Text(cloudSyncEnabled ? "Aktiv. Karten werden verschlüsselt gesichert." : "Aus. Aktivieren ist freiwillig.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+
+                                Image(systemName: "chevron.right")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding()
+                            .background(Color(.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 24))
+                        }
+                        .buttonStyle(.plain)
+                        .sheet(isPresented: $showCloudSync) {
+                            CloudSyncView()
+                                .environmentObject(store)
+                        }
 
                         VStack(alignment: .leading, spacing: 12) {
                             Text("App Status")
@@ -3064,6 +3373,289 @@ struct SettingsView: View {
             }
             .navigationBarHidden(true)
         }
+    }
+}
+
+struct CloudSyncView: View {
+    @EnvironmentObject var store: CardStore
+    @Environment(\.dismiss) private var dismiss
+
+    @AppStorage("tascherl_cloudSyncEnabled") private var cloudSyncEnabled = false
+
+    @State private var email = ""
+    @State private var password = ""
+    @State private var recoveryKeyInput = ""
+    @State private var generatedRecoveryKey = ""
+    @State private var message = ""
+    @State private var working = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Verschlüsselte Cloud")
+                            .font(.largeTitle.bold())
+
+                        Text("Deine Karten werden vor dem Upload auf deinem Gerät verschlüsselt. Der Server sieht nur verschlüsselte Daten.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    TextField("E-Mail", text: $email)
+                        .textFieldStyle(TascherlTextFieldStyle())
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    SecureField("Passwort min. 12 Zeichen", text: $password)
+                        .textFieldStyle(TascherlTextFieldStyle())
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Recovery-Key")
+                            .font(.headline)
+
+                        Text("Für ein neues Gerät brauchst du diesen Key. Ohne diesen Key können deine Cloud-Daten nicht entschlüsselt werden.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        TextField("Recovery-Key eingeben oder neu generieren", text: $recoveryKeyInput)
+                            .textFieldStyle(TascherlTextFieldStyle())
+                    }
+
+                    Button {
+                        generateRecoveryKey()
+                    } label: {
+                        Label("Neuen Recovery-Key generieren", systemImage: "key.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tascherlActionButton()
+
+                    if !generatedRecoveryKey.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("WICHTIG: Recovery-Key sichern")
+                                .font(.headline)
+                                .foregroundStyle(.red)
+
+                            Text(generatedRecoveryKey)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                        }
+                    }
+
+                    Button {
+                        Task { await registerAndEnable() }
+                    } label: {
+                        Text(working ? "Bitte warten..." : "Account erstellen & Cloud aktivieren")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(TascherlTheme.matteYellow)
+                            .foregroundStyle(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 20))
+                    }
+                    .disabled(working || email.isEmpty || password.count < 12)
+
+                    Button {
+                        Task { await loginAndEnable() }
+                    } label: {
+                        Text("Einloggen & Cloud aktivieren")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tascherlActionButton()
+                    .disabled(working || email.isEmpty || password.count < 12 || recoveryKeyInput.isEmpty)
+
+                    Button(role: .destructive) {
+                        disableCloud()
+                    } label: {
+                        Text("Cloud Sync deaktivieren")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tascherlActionButton()
+
+                    Button {
+                        Task { await uploadNow() }
+                    } label: {
+                        Text("Jetzt sichern")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tascherlActionButton()
+                    .disabled(!cloudSyncEnabled)
+
+                    Button {
+                        Task { await downloadNow() }
+                    } label: {
+                        Text("Vom Server laden")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .tascherlActionButton()
+                    .disabled(!cloudSyncEnabled)
+
+                    if !message.isEmpty {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Cloud Sync")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Fertig") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func generateRecoveryKey() {
+        let key = TascherlCrypto.generateSyncKey()
+        let text = TascherlCrypto.recoveryKeyString(from: key)
+
+        generatedRecoveryKey = text
+        recoveryKeyInput = text
+    }
+
+    private func registerAndEnable() async {
+        working = true
+        defer { working = false }
+
+        do {
+            let token = try await TascherlCloudAPI.shared.register(email: email, password: password)
+
+            let syncKey: Data
+
+            if let entered = TascherlCrypto.keyData(fromRecoveryKey: recoveryKeyInput), entered.count == 32 {
+                syncKey = entered
+            } else {
+                syncKey = TascherlCrypto.generateSyncKey()
+                let text = TascherlCrypto.recoveryKeyString(from: syncKey)
+
+                await MainActor.run {
+                    generatedRecoveryKey = text
+                    recoveryKeyInput = text
+                }
+            }
+
+            try TascherlCloudStorage.saveToken(token)
+            try TascherlCloudStorage.saveSyncKey(syncKey)
+
+            UserDefaults.standard.set(true, forKey: "tascherl_cloudSyncEnabled")
+
+            try await uploadCurrentCards(token: token, syncKey: syncKey)
+
+            await MainActor.run {
+                cloudSyncEnabled = true
+                message = "Cloud Sync aktiviert. Recovery-Key unbedingt sichern."
+            }
+        } catch {
+            await MainActor.run {
+                message = "Fehler: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func loginAndEnable() async {
+        working = true
+        defer { working = false }
+
+        do {
+            guard let syncKey = TascherlCrypto.keyData(fromRecoveryKey: recoveryKeyInput),
+                  syncKey.count == 32
+            else {
+                await MainActor.run {
+                    message = "Recovery-Key ist ungültig."
+                }
+                return
+            }
+
+            let token = try await TascherlCloudAPI.shared.login(email: email, password: password)
+
+            try TascherlCloudStorage.saveToken(token)
+            try TascherlCloudStorage.saveSyncKey(syncKey)
+
+            UserDefaults.standard.set(true, forKey: "tascherl_cloudSyncEnabled")
+
+            await MainActor.run {
+                cloudSyncEnabled = true
+                message = "Cloud Sync aktiviert."
+            }
+        } catch {
+            await MainActor.run {
+                message = "Fehler: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func uploadNow() async {
+        do {
+            guard let token = try TascherlCloudStorage.loadToken(),
+                  let syncKey = try TascherlCloudStorage.loadSyncKey()
+            else {
+                message = "Nicht eingeloggt."
+                return
+            }
+
+            try await uploadCurrentCards(token: token, syncKey: syncKey)
+
+            await MainActor.run {
+                message = "Karten verschlüsselt gesichert."
+            }
+        } catch {
+            await MainActor.run {
+                message = "Upload fehlgeschlagen: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func downloadNow() async {
+        do {
+            guard let token = try TascherlCloudStorage.loadToken(),
+                  let syncKey = try TascherlCloudStorage.loadSyncKey()
+            else {
+                message = "Nicht eingeloggt."
+                return
+            }
+
+            let response = try await TascherlCloudAPI.shared.download(token: token)
+
+            guard let ciphertext = response.ciphertext else {
+                await MainActor.run {
+                    message = "Am Server sind noch keine Karten gespeichert."
+                }
+                return
+            }
+
+            try await MainActor.run {
+                try store.importEncryptedCardsBlob(ciphertext, syncKey: syncKey)
+                message = "Karten vom Server geladen."
+            }
+        } catch {
+            await MainActor.run {
+                message = "Download fehlgeschlagen: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func uploadCurrentCards(token: String, syncKey: Data) async throws {
+        let data = try JSONEncoder().encode(store.cards)
+        let encrypted = try TascherlCrypto.encrypt(data, with: syncKey)
+        try await TascherlCloudAPI.shared.upload(ciphertext: encrypted, token: token)
+    }
+
+    private func disableCloud() {
+        UserDefaults.standard.set(false, forKey: "tascherl_cloudSyncEnabled")
+        TascherlCloudStorage.clear()
+        cloudSyncEnabled = false
+        message = "Cloud Sync deaktiviert. Lokale Karten bleiben erhalten."
     }
 }
 
